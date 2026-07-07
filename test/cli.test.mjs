@@ -187,10 +187,56 @@ test('--in-place overwrites the input', () => {
   });
 });
 
+test('punch fixture: default run leaves the no-white-reveal white alone', () => {
+  inTmp('punch.svg', (dir, file) => {
+    const out = run(file);
+    assert.match(out, /whites left alone \(knockout would not reveal white\): 1/);
+    assert.doesNotMatch(out, /punched through/); // line only exists under the flag
+    assert.match(out, /no changes needed, nothing written/);
+    assert.ok(!existsSync(path.join(dir, 'punch-compound.svg')));
+  });
+});
+
+test('--punch-through converts category-2 whites into evenodd holes', () => {
+  inTmp('punch.svg', (dir, file) => {
+    const out = run('--punch-through', file);
+    assert.match(out, /punched through \(intentional reveal\): 1/);
+    assert.match(out, /whites compounded: 0/); // categories stay consistent
+    assert.doesNotMatch(out, /knockout would not reveal white/);
+    if (HAVE_RSVG) {
+      // masked verify: the intentional region is excluded, the rest passes
+      assert.match(out, /verify: PASS 0\.0000% flat-field/);
+      assert.match(out, /masked as intentional punch-through/);
+    }
+    const compound = readFileSync(path.join(dir, 'punch-compound.svg'), 'utf8');
+    const black = compound.match(/<path fill="#000" d="M250 250[^"]*"[^>]*>/);
+    assert.ok(black, 'black target present');
+    assert.match(black[0], /fill-rule="evenodd"/);
+    assert.match(black[0], /M400 400/); // punched white's subpath appended
+    assert.doesNotMatch(compound, /<path fill="#fff" d="M400 400/); // white gone
+    assert.match(compound, /M150 150h700v700H150z/); // gray field untouched
+  });
+});
+
+test('--punch-through mask does not blind verify to damage outside it', (t) => {
+  if (!HAVE_RSVG) return t.skip('needs rsvg-convert');
+  inTmp('punch.svg', (dir, file) => {
+    // --min-area 1000 deliberately deletes a visible 30x30 gray dot far from
+    // the punched region: verify must fail on that flat-field damage even
+    // though a punch mask is active, and bisect must strip everything back.
+    const out = run('--punch-through', '--min-area', '1000', file);
+    assert.match(out, /verify FAILED with all transforms/);
+    assert.match(out, /verify FAILED with transforms \{1,2\}/);
+    assert.match(out, /no changes needed, nothing written/);
+    assert.ok(!existsSync(path.join(dir, 'punch-compound.svg')));
+  });
+});
+
 test('--help prints only the header block', () => {
   const out = run('--help');
   assert.match(out, /^svg-knockout: turn stacked AI-vectorizer SVG output/);
   assert.match(out, /--min-area/);
+  assert.match(out, /--punch-through/);
   assert.doesNotMatch(out, /----/); // no internal section banners leak
   assert.doesNotMatch(out, /import /);
 });

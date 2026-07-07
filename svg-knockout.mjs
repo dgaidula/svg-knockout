@@ -40,6 +40,15 @@
 // real transparency, not paper); whites only partially overlapping darker
 // shapes (counted in the report); stroked or transformed paths.
 //
+// --punch-through (advanced): also hole the fully-contained whites whose
+// knockout would NOT reveal white (ben-day dots or gray under the dark
+// shape). That rendering change is intentional — it gives you true
+// knockout structure so you can place your own paint behind the compound
+// path and have it show through the holes. Verification still runs, with
+// exactly the punched regions masked out of the diff; everything outside
+// the mask must pass the normal gates. Whites blocked by intervening
+// paint are still left alone even with this flag.
+//
 // Usage:
 //   svg-knockout art.svg [more.svg dirs/ ...]   # writes art-compound.svg
 //   svg-knockout --in-place exports/            # overwrite, recursive
@@ -49,6 +58,8 @@
 //   --min-area <px2|N%>  speck threshold: an absolute area in viewBox px²,
 //                        or N% = a square whose side is N% of the shorter
 //                        viewBox dimension (default 0.1%)
+//   --punch-through      also hole contained whites whose knockout reveals
+//                        non-white paint (intentional change; see above)
 //   --in-place           overwrite inputs instead of writing *-compound.svg
 //   --force              regenerate existing *-compound.svg outputs
 //                        (default: skip them, so re-runs are idempotent)
@@ -638,7 +649,7 @@ function transform3Redundant(drawables, canvasBase, eps, stats) {
   }
 }
 
-function transform4Knockouts(drawables, canvasBase, eps, stats) {
+function transform4Knockouts(drawables, canvasBase, eps, stats, punchThrough) {
   let changed = true;
   const blockedReveal = new Set(), partial = new Set(), blockedOther = new Set();
   while (changed) {
@@ -659,28 +670,41 @@ function transform4Knockouts(drawables, canvasBase, eps, stats) {
         if (darkerSolid && b !== canvasBase && contains(b, w, eps)) {
           if (!eoSafe(b) || !eoSafe(w)) { blockedOther.add(w); break; }
           const rs = revealSamples(w);
-          let ok = rs.length > 0;
-          for (let i = 0; i < rs.length && ok; i += 2) {
-            if (revealAt(drawables, b.index, rs[i], rs[i + 1]) !== 'white') ok = false;
+          let revealsWhite = rs.length > 0;
+          for (let i = 0; i < rs.length && revealsWhite; i += 2) {
+            if (revealAt(drawables, b.index, rs[i], rs[i + 1]) !== 'white') revealsWhite = false;
           }
-          if (!ok) { blockedReveal.add(w); break; }
+          // --punch-through is the sanctioned override of the reveal check:
+          // the hole exposing non-white paint (or nothing) is the point —
+          // the designer places their own paint behind the compound path.
+          // The punched region is recorded so verify can mask exactly it.
+          if (!revealsWhite && !punchThrough) { blockedReveal.add(w); break; }
           // compound: append W's subpaths (absolute, rounded to 0.01px so
           // re-serialization does not balloon the file) into B, evenodd,
           // delete W
+          if (revealsWhite) {
+            stats.whitesCompounded++;
+            stats.knockoutTargets.add(b);
+          } else {
+            stats.punched++;
+            stats.punchedRegions.push({ flat: geom(w), fillRule: w.fillRule });
+          }
           b.curD = b.curD + svgpath(w.curD).abs().round(2).toString();
           b.fillRule = 'evenodd';
           b.modified = true;
           b.flat = null; b.eoSafeCache = null; b.sampleCache = null;
           w.alive = false;
-          stats.whitesCompounded++;
-          stats.knockoutTargets.add(b);
           blockedReveal.delete(w); partial.delete(w); blockedOther.delete(w);
           changed = true;
           break;
         }
         if (regionsIntersect(b, w)) {
           // real overlap: a darker solid that doesn't contain W is the
-          // owner's "linked to a larger area" partial case
+          // owner's "linked to a larger area" partial case. These stay out
+          // even under --punch-through: paint between the target and the
+          // white (or a white lapping outside its dark shape) would keep
+          // painting over parts of the hole, so the result would be neither
+          // the original nor a clean knockout.
           (darkerSolid ? partial : blockedOther).add(w);
           break;
         }
@@ -747,7 +771,7 @@ function resolveMinArea(spec, vb) {
 
 // Run the enabled subset of transforms over the file text. enabled is a Set
 // of transform numbers (1..4).
-function runTransforms(text, enabled, minAreaSpec) {
+function runTransforms(text, enabled, minAreaSpec, punchThrough = false) {
   const svg = parseSvg(text);
   const vb = viewBoxOf(svg);
   // Flattening tolerance and the containment epsilon must resolve sub-pixel
@@ -765,13 +789,13 @@ function runTransforms(text, enabled, minAreaSpec) {
     pathsBefore: drawables.filter((d) => d.tag === 'path').length,
     groupsUnwrapped: 0, specksRemoved: 0, redundantRemoved: 0,
     whitesCompounded: 0, whitesPartial: 0, whitesBlockedReveal: 0, whitesBlockedOther: 0,
-    knockoutTargets: new Set(), minArea,
+    punched: 0, punchedRegions: [], knockoutTargets: new Set(), minArea, vb,
   };
   const canvasBase = findCanvasBase(drawables, vb);
   const unwrapped = enabled.has(1) ? transform1Groups(groups, stats) : [];
   if (enabled.has(2)) transform2Specks(drawables, canvasBase, minArea, stats);
   if (enabled.has(3)) transform3Redundant(drawables, canvasBase, eps, stats);
-  if (enabled.has(4)) transform4Knockouts(drawables, canvasBase, eps, stats);
+  if (enabled.has(4)) transform4Knockouts(drawables, canvasBase, eps, stats, punchThrough);
   stats.pathsAfter = drawables.filter((d) => d.tag === 'path' && d.alive).length;
   stats.knockoutCount = stats.knockoutTargets.size;
   const out = buildOutput(text, drawables, unwrapped);
@@ -855,7 +879,47 @@ function edgeMask(img) {
   return dilated;
 }
 
-function verifyPair(origFile, outText) {
+// Rasterize the punched whites' regions at verify resolution, dilated ~2px
+// for antialiasing at the hole edges. Pixels under this mask are EXCLUDED
+// from the diff entirely — the rendering change there is the sanctioned,
+// intentional point of --punch-through. Everything outside the mask is
+// still judged by the standard gates, so the mask cannot blind the rail to
+// unrelated damage.
+function buildPunchMask(punched, width, height) {
+  const [minX, minY, vbW, vbH] = punched.vb;
+  const sx = width / vbW, sy = height / vbH;
+  let mask = new Uint8Array(width * height);
+  for (const reg of punched.regions) {
+    const g = reg.flat;
+    if (!g || g.subpaths.length === 0) continue;
+    const px0 = Math.max(0, Math.floor((g.bbox[0] - minX) * sx) - 1);
+    const px1 = Math.min(width - 1, Math.ceil((g.bbox[2] - minX) * sx) + 1);
+    const py0 = Math.max(0, Math.floor((g.bbox[1] - minY) * sy) - 1);
+    const py1 = Math.min(height - 1, Math.ceil((g.bbox[3] - minY) * sy) + 1);
+    for (let y = py0; y <= py1; y++) {
+      const vy = (y + 0.5) / sy + minY;
+      for (let x = px0; x <= px1; x++) {
+        if (insideRegion(g.idx, reg.fillRule, (x + 0.5) / sx + minX, vy)) mask[y * width + x] = 1;
+      }
+    }
+  }
+  for (const [dx, dy] of [[1, 0], [0, 1]]) { // separable dilation, radius 2
+    const grown = new Uint8Array(mask);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (!mask[y * width + x]) continue;
+        for (let d = -2; d <= 2; d++) {
+          const nx = x + d * dx, ny = y + d * dy;
+          if (nx >= 0 && ny >= 0 && nx < width && ny < height) grown[ny * width + nx] = 1;
+        }
+      }
+    }
+    mask = grown;
+  }
+  return mask;
+}
+
+function verifyPair(origFile, outText, punched = null) {
   const dir = mkdtempSync(path.join(tmpdir(), 'svg-knockout-'));
   try {
     const outFile = path.join(dir, 'candidate.svg');
@@ -863,11 +927,15 @@ function verifyPair(origFile, outText) {
     const a = renderOverMagenta(origFile);
     const b = renderOverMagenta(outFile);
     if (a.width !== b.width || a.height !== b.height) {
-      return { pass: false, changedPct: 100, edgeChangedPct: 0, maxDelta: 255, note: 'render size mismatch' };
+      return { pass: false, changedPct: 100, edgeChangedPct: 0, maskedPct: 0, maxDelta: 255, note: 'render size mismatch' };
     }
     const mask = edgeMask(a);
-    let changed = 0, edgeChanged = 0, maxDelta = 0;
+    const pmask = punched && punched.regions.length > 0
+      ? buildPunchMask(punched, a.width, a.height)
+      : null;
+    let changed = 0, edgeChanged = 0, masked = 0, maxDelta = 0;
     for (let i = 0, p = 0; i < a.px.length; i += 3, p++) {
+      if (pmask && pmask[p]) { masked++; continue; } // intentional punch region
       const d = Math.max(
         Math.abs(a.px[i] - b.px[i]),
         Math.abs(a.px[i + 1] - b.px[i + 1]),
@@ -881,7 +949,8 @@ function verifyPair(origFile, outText) {
     const frac = changed / total, edgeFrac = edgeChanged / total;
     return {
       pass: frac < VERIFY_MAX_CHANGED && edgeFrac < VERIFY_MAX_EDGE_CHANGED,
-      changedPct: frac * 100, edgeChangedPct: edgeFrac * 100, maxDelta, changed, total,
+      changedPct: frac * 100, edgeChangedPct: edgeFrac * 100,
+      maskedPct: (masked / total) * 100, maxDelta, changed, total,
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -913,14 +982,14 @@ function processFile(file, opts) {
   for (const level of LEVELS) {
     let r;
     try {
-      r = runTransforms(text, new Set(level.enabled), opts.minArea);
+      r = runTransforms(text, new Set(level.enabled), opts.minArea, opts.punchThrough);
     } catch (e) {
       console.log(`  error: ${e.message}`);
       return { status: 'error' };
     }
     if (opts.noVerify) { result = r; break; }
     if (!r.stats.changed) { result = r; verify = { pass: true, changedPct: 0, maxDelta: 0, trivial: true }; break; }
-    const v = verifyPair(file, r.out);
+    const v = verifyPair(file, r.out, { regions: r.stats.punchedRegions, vb: r.stats.vb });
     if (v.pass) { result = r; verify = v; rolledBack = level.dropped; break; }
     console.log(
       `  verify FAILED with ${level.dropped === null ? 'all transforms' : `transforms {${level.enabled.join(',')}}`}: ` +
@@ -939,6 +1008,7 @@ function processFile(file, opts) {
   console.log(`  specks removed: ${s.specksRemoved} (min area ${s.minArea.toFixed(1)} px²)`);
   console.log(`  redundant same-color removed: ${s.redundantRemoved}`);
   console.log(`  whites compounded: ${s.whitesCompounded} (into ${s.knockoutCount} knockout path${s.knockoutCount === 1 ? '' : 's'})`);
+  if (opts.punchThrough) console.log(`  punched through (intentional reveal): ${s.punched}`);
   if (s.whitesPartial) console.log(`  whites left alone (partial overlap): ${s.whitesPartial}`);
   if (s.whitesBlockedReveal) console.log(`  whites left alone (knockout would not reveal white): ${s.whitesBlockedReveal}`);
   if (s.whitesBlockedOther) console.log(`  whites left alone (blocked by intervening paint): ${s.whitesBlockedOther}`);
@@ -951,6 +1021,7 @@ function processFile(file, opts) {
   } else {
     console.log(`  verify: PASS ${verify.changedPct.toFixed(4)}% flat-field pixels changed` +
       ` (max delta ${verify.maxDelta}; ${verify.edgeChangedPct.toFixed(4)}% single-px AA seams)` +
+      (verify.maskedPct > 0 ? ` (${verify.maskedPct.toFixed(2)}% masked as intentional punch-through)` : '') +
       ` @${VERIFY_WIDTH}px over magenta`);
   }
   if (rolledBack) console.log(`  rolled back: ${rolledBack} — render diff exceeded ${VERIFY_MAX_CHANGED * 100}%`);
@@ -986,6 +1057,7 @@ function main() {
   const { values, positionals } = parseArgs({
     options: {
       'min-area': { type: 'string' },
+      'punch-through': { type: 'boolean', default: false },
       'in-place': { type: 'boolean', default: false },
       force: { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
@@ -1008,6 +1080,7 @@ function main() {
 
   const opts = {
     minArea: values['min-area'] ?? null,
+    punchThrough: values['punch-through'],
     inPlace: values['in-place'],
     force: values.force,
     dryRun: values['dry-run'],

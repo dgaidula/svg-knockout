@@ -73,7 +73,10 @@ and is not the canvas base; then three more gates:
   ("knockout would not reveal white") and left. Reveal samples are
   scanline span midpoints (`revealSamples`) — strictly interior, because
   W's boundary vertices sit knife-edge on identically-traced boundaries
-  of the paint beneath.
+  of the paint beneath. **The invariant guards the DEFAULT;
+  `--punch-through` is its one sanctioned override** (below) — never
+  weaken the check itself, route intentional overrides through the flag
+  so verify knows exactly which regions were allowed to change.
 - compounding appends `svgpath(w.curD).abs().round(2).toString()` to
   B's `d` (round(2), or re-serialization balloons files ~40 %), sets
   `fill-rule="evenodd"`, kills W, and invalidates B's caches so the next
@@ -84,6 +87,39 @@ Whites are only ever *sources* (they're never darker than anything), so
 a compounded W can't have been someone's target; B *can* receive
 multiple whites, and later containment tests correctly exclude the holes
 already cut.
+
+## `--punch-through` (1.1.0): the sanctioned reveal override
+
+The flag converts exactly the **category-2** whites (fully contained,
+every other T4 gate passed, only the reveal check failed) into evenodd
+holes anyway. The rendering change is intentional: real holes let a
+designer place their own paint behind the compound path, which
+painted-on whites forbid. Mechanics:
+
+- Same compound code path; the white is tallied as `stats.punched` (not
+  `whitesCompounded` — categories stay disjoint) and its flattened
+  geometry is pushed to `stats.punchedRegions` before deletion.
+- **Category-3 (blocked by intervening paint) stays excluded even under
+  the flag.** Intervening paint sits above B and below W: delete W and
+  hole B, and that paint still renders over parts of the hole — the
+  result is neither the original nor a clean knockout. Punching those
+  needs the intervening paint resolved first (clipping), so they wait
+  for the partial-overlap v2 machinery. Same for partial-overlap whites.
+- **Masked verify** (`buildPunchMask`): the punched regions are
+  rasterized at verify resolution (point-in-region per pixel center in
+  viewBox coords, mapped through width/height vs viewBox — this handles
+  `preserveAspectRatio="none"` stretch), dilated 2 px separably for hole-
+  edge antialiasing, and those pixels are EXCLUDED from the diff (their
+  area is reported as masked %). Everything outside still faces the
+  normal flat-field/edge gates — the `--min-area`-corruption test in the
+  suite proves the mask cannot blind the rail to unrelated damage.
+- Fixpoint cascades are expected and correct: punching a white deletes
+  an intervening blocker and may unblock further whites; a white whose
+  reveal used to be a now-punched white re-classifies as punched itself
+  (the model always matches the intended OUTPUT rendering, and each
+  punched white contributes its own mask region). So real-file punched
+  counts can exceed the default run's "knockout would not reveal white"
+  count — that is cascade, not a bug.
 
 ## Geometry lessons paid for on real files (do not regress)
 

@@ -118,15 +118,50 @@ art.svg:
   compounding; they are counted in the report and left alone.
 - **Whites whose knockout would not reveal white** — if the paint under
   the dark shape is a pattern or another color, a hole would change the
-  artwork (ben-day dots showing through a face). Counted and left alone.
+  artwork (ben-day dots showing through a face). Counted and left alone —
+  unless you ask for exactly that with `--punch-through` (below).
 - **Stroked or transformed paths**, and anything inside a `<g>` that
   carries attributes — treated as opaque obstacles, never edited.
+
+## Punch-through: full-transparency mode
+
+`--punch-through` is the advanced mode for when appearance preservation is
+not the goal — **knockout structure is**. By default, a fully-contained
+white is only compounded when the hole provably reveals white beneath;
+whites sitting on a dark shape that itself sits on a dot pattern (or a
+gray) are left painted, because a hole there changes the rendering.
+
+But painted-on whites are a dead end for separation work: you cannot
+place your own colored shape *behind* the compound path and have it show
+through white paint. `--punch-through` converts those whites into real
+evenodd holes anyway. The rendering change is intentional and is the
+entire point — drop the compound path over any background in your layout
+tool and the background reads through every hole.
+
+```
+  whites compounded: 0 (into 0 knockout paths)
+  punched through (intentional reveal): 23
+  verify: PASS 0.0000% flat-field pixels changed (max delta 0; 0.0037% single-px AA seams) (8.35% masked as intentional punch-through) @1000px over magenta
+```
+
+Verification still runs and still means something: the punched whites'
+regions are rasterized into a pixel mask (dilated ~2 px for
+antialiasing), those pixels are excluded from the diff as the sanctioned
+change, and **everything outside the mask must pass the normal gates**.
+The report shows how much of the frame was masked.
+
+Only the fully-contained, reveal-blocked whites are punched. Whites
+blocked by **intervening paint** stay excluded even under the flag: paint
+layered between the dark shape and the white keeps painting over parts of
+the hole after the white is deleted, so the result would be neither the
+original artwork nor a clean knockout — it needs clipping, not punching.
 
 ## Options
 
 | flag | default | meaning |
 |---|---|---|
 | `--min-area <px²\|N%>` | `0.1%` | speck threshold: absolute area in viewBox px², or `N%` = a square whose side is N % of the shorter viewBox dimension |
+| `--punch-through` | off | also hole contained whites whose knockout reveals non-white paint — an intentional rendering change for placing your own paint behind the compound path; verify masks exactly those regions |
 | `--in-place` | off | overwrite inputs instead of writing `*-compound.svg` |
 | `--force` | off | regenerate existing `*-compound.svg` outputs (default: skip, so re-runs are idempotent) |
 | `--dry-run` | off | report only (verify included), write nothing |

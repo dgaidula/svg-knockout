@@ -1,6 +1,6 @@
 {
   "name": "svg-knockout",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Clean up AI-vectorizer SVG output for print: remove invisible speck paths and fully-occluded redundant paths, and restructure stacked white-on-black shapes into true compound-path knockouts — verified by a pixel diff of both renders over a magenta backdrop.",
   "type": "module",
   "bin": {

@@ -166,6 +166,7 @@ original artwork nor a clean knockout — it needs clipping, not punching.
 | `--force` | off | regenerate existing `*-compound.svg` outputs (default: skip, so re-runs are idempotent) |
 | `--dry-run` | off | report only (verify included), write nothing |
 | `--no-verify` | off | skip the render-diff safety rail — not recommended |
+| `--cheat` | | print a short card of common invocations in tldr page format and exit |
 | `--help` | | print usage |
 
 ## Calibration: the speck threshold

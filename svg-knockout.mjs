@@ -67,6 +67,8 @@
 //   --no-verify          skip the render-diff safety rail (risk: a bad
 //                        transform ships unnoticed; only for environments
 //                        without rsvg-convert)
+//   --cheat              print a short card of common invocations in tldr page
+//                        format and exit
 //   --help               print this usage
 
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -1039,6 +1041,31 @@ function processFile(file, opts) {
   return { status: 'ok' };
 }
 
+const CHEAT = `# svg-knockout
+
+> Turn stacked vectorizer SVG output into true compound-path knockouts and strip invisible noise paths.
+> More information: svg-knockout --help.
+
+- Simulate on a folder, running the render check but writing nothing:
+
+\`svg-knockout --dry-run {{path/to/directory}}\`
+
+- Write *-compound.svg copies beside the originals:
+
+\`svg-knockout {{path/to/file1.svg path/to/file2.svg ...}}\`
+
+- Overwrite every SVG in a folder, recursively:
+
+\`svg-knockout --in-place {{path/to/directory}}\`
+
+- Set the speck threshold as a share of the viewBox:
+
+\`svg-knockout --min-area {{0.1%}} {{path/to/file.svg}}\`
+
+- Also hole whites that reveal other paint underneath:
+
+\`svg-knockout --punch-through {{path/to/file.svg}}\``;
+
 // ---- CLI -------------------------------------------------------------------------------
 
 function collectSvgs(p, out) {
@@ -1062,10 +1089,16 @@ function main() {
       force: { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
       'no-verify': { type: 'boolean', default: false },
+      cheat: { type: 'boolean', default: false },
       help: { type: 'boolean', default: false },
     },
     allowPositionals: true,
   });
+
+  if (values.cheat && !values.help) {
+    console.log(CHEAT);
+    return;
+  }
 
   if (values.help || positionals.length === 0) {
     const lines = readFileSync(new URL(import.meta.url), 'utf8').split('\n');

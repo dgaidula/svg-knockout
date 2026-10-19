@@ -286,3 +286,13 @@ test('--cheat prints a tldr page titled with the command name, exits 0, and prin
   assert.equal(page.name, 'svg-knockout');
   assert.ok(page.examples.length >= 3);
 });
+
+test('--help wins over --cheat in either order', () => {
+  const help = spawnSync('node', [CLI, '--help'], { encoding: 'utf8' });
+  assert.equal(help.status, 0);
+  for (const args of [['--help', '--cheat'], ['--cheat', '--help']]) {
+    const r = spawnSync('node', [CLI, ...args], { encoding: 'utf8' });
+    assert.equal(r.status, 0, args.join(' '));
+    assert.equal(r.stdout, help.stdout, args.join(' '));
+  }
+});
